@@ -1,0 +1,357 @@
+package main;
+import (
+    "database/sql"
+    _"github.com/Go-SQL-Driver/MySQL"
+    "fmt"
+    "errors"
+    "time"
+    "strconv"
+    "os"
+    "os/exec"
+    "strings"
+    "encoding/json"
+    "io/ioutil"
+    "sync"
+)
+
+
+
+var  db_local *sql.DB
+var seconds int
+var param string
+var hostname string
+var lock sync.Mutex
+
+type config_str struct {
+        Get_vmstat string
+        Get_mysql string
+        Local_user string
+        Local_pass string
+        Local_port string
+        Local_ip string
+        Remote_user string
+        Remote_pass string
+        Remote_port string
+        Remote_ip string
+        Hostname string
+        Insertfile string
+        Insertmysql string
+}
+
+type  stack []interface{}
+var   s  *stack
+
+
+type mysql_param struct {
+ct string
+param string
+value int64
+}
+
+func (s *stack) Push(x interface{}) {
+lock.Lock()
+if len(*s)< 3000 {
+*s=append(*s,x)
+
+}
+lock.Unlock()
+} 
+
+func (s *stack) Pop()(interface{},error) {
+        lock.Lock()
+        if len(*s) == 0 {
+        lock.Unlock()
+        return nil , errors.New("null data")
+        }
+        result :=(*s)[0]
+        *s = (*s)[1:]
+        lock.Unlock()
+        return result,nil
+}
+
+
+
+func insert_param() string {
+        // i_param:="begin ;"
+        i_param:="insert into param_value(ct,ip,param,param_value) values"
+        var tmp_2 interface{} 
+        for {
+
+                tmp_2,_=s.Pop()
+
+                if tmp_2 == nil { break }
+                tmp_1:=tmp_2.(mysql_param)
+
+
+
+                //i_param=i_param+"insert into param_value(ct,ip,param,param_value) values('"
+                i_param=i_param+"('"+tmp_1.ct+"','"+hostname+"','"+tmp_1.param+"','"+strconv.FormatInt(tmp_1.value,10)+"'),"
+        }
+
+        i_param=string([]rune(i_param)[:len(i_param)-1])
+        i_param=i_param+";"
+        // result:=i_param+" commit;"
+        if len(i_param)<100 {i_param=""}
+        return i_param
+
+
+
+}
+
+
+func get_vmstat(seconds int) {
+    for {
+    begintime:=time.Now()
+                //Format("2006-01-02 15:04:05")
+    cmd := exec.Command("/bin/bash", "-c", "vmstat 5 6")
+    tmp,_:=cmd.Output()
+    res:=string(tmp)
+    res= strings.Replace(res, "\n", " *enter*", -1)
+    fs:=strings.Fields(res)
+   
+    if len(fs)<50 { continue }
+   
+  //  fmt.Println("fs",fs)
+    
+    //去掉第一行
+    i:=0
+    for _,ac:=range fs {
+        if ac == "*enter*" { break }
+        i=i+1
+        //fmt.Println(ac)
+    }
+    //获去第二行
+    if len(fs)<i { continue }
+    fs=fs[i+1:]
+    
+    i=0
+    for _,ae:=range fs {
+        if ae == "*enter*" {break}
+        i=i+1
+   }
+
+    
+    fieldname:=fs[:i]
+   // fmt.Println("fieldname",fieldname)
+   if len(fs)<i { continue }
+    fs=fs[i+1:]
+   // fmt.Println("fs2",fs)
+
+    
+    j:=0
+    i=0
+    
+   
+    
+    for _,av:=range fs {
+    
+     if av ==  "*enter*" { 
+        j=0 
+        begintime=begintime.Add(time.Duration(seconds)*time.Second)
+     }
+     if j>len(fieldname)-1 { continue }
+     if av != "*enter*" { 
+        
+        tmp_int,_:= strconv.ParseInt(av, 10, 64)
+        sys_value:=mysql_param{ct:begintime.Format("2006-01-02 15:04:05"),param:fieldname[j],value:tmp_int}
+        
+        // fmt.Println("sysvalue",sys_value)
+        s.Push(sys_value)
+        j=j+1
+       }
+    
+    }
+  
+    
+    time.Sleep(time.Duration(seconds)*time.Second)
+ }
+
+}
+func get_param(seconds int) {
+        // s=new(stack)
+         var v_name string
+         var v_value int64
+         //db_local,err:=sql.Open("mysql","dba_monitor:dba123456@tcp(127.0.0.1:3306)/test?charset=utf8")
+         defer db_local.Close()
+         
+         for  true { 
+
+                if seconds == 0 { break }
+
+
+
+                
+
+                row2,err_param:=db_local.Query(param);
+                if err_param != nil { continue}
+
+                for row2.Next() {
+                row2.Scan(&v_name,&v_value);
+                mysql_value:=mysql_param{ ct:time.Now().Format("2006-01-02 15:04:05"),param:v_name,value:v_value }
+                s.Push(mysql_value)
+
+                }
+        time.Sleep(time.Duration(seconds)*time.Second)
+
+        }
+
+
+
+
+
+}
+
+func main() {
+
+         mon_error, err := os.OpenFile("mon_error.txt", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0660)
+                if err != nil {
+                panic(err)
+                }
+         defer mon_error.Close()
+
+
+        s=new(stack)
+
+        cmd := exec.Command("/bin/bash", "-c", "hostname -i")
+        tmp,_:=cmd.Output()
+        hostname=string(tmp)
+        hostname = strings.Replace(hostname, "\n", "", -1)  
+
+         mon_error.WriteString("host:"+hostname+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+         //mon_error.Sync()
+
+
+
+
+
+        cs:=config_str{}
+        bytes, err := ioutil.ReadFile( "monconfig.txt")
+        if err != nil {
+         mon_error.WriteString("配置读取错误:"+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+        return
+        }
+
+        if err := json.Unmarshal(bytes, &cs); err != nil {
+         mon_error.WriteString("配置转结构体错误:"+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+        return 
+        }
+
+
+        if (hostname=="") {
+        hostname=cs.Hostname
+        }
+
+
+
+
+         insertfile, err := os.OpenFile("insertfile.txt", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0660)
+                if err != nil {
+                panic(err)
+                }
+         defer insertfile.Close()
+
+        link_remote:=cs.Remote_user+":"+cs.Remote_pass+"@tcp("+cs.Remote_ip+":"+cs.Remote_port+")/mon_server?charset=utf8"
+        link_local:=cs.Local_user+":"+cs.Local_pass+"@tcp("+cs.Local_ip+":"+cs.Local_port+")/information_schema?charset=utf8"
+
+
+
+
+
+        remote_db,remote_err:=sql.Open("mysql",link_remote)
+
+        var tmp_insert string
+
+        if remote_err != nil {
+         fmt.Println("远程SQL连接错误",link_remote)
+         mon_error.WriteString("远程SQL连接错误:"+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+        }
+
+        err = remote_db.Ping()
+         mon_error.WriteString("远程SQL无法连接:"+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+
+        var local_err error
+        db_local,local_err=sql.Open("mysql",link_local)
+
+
+        local_err = db_local.Ping()
+        fmt.Println("local_err",local_err)
+
+        if local_err != nil {
+         fmt.Println("本地SQL连接错误",link_local,"end")
+         mon_error.WriteString("本地SQL无法连接:"+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+        }
+
+
+
+
+
+
+       
+        
+       if (cs.Insertmysql=="1") {
+        row,err1:=remote_db.Query("SELECT mysql_param,seconds FROM mysql_monitor limit 1");
+        if err1 != nil {
+        fmt.Println("查询不到配置");
+         mon_error.WriteString("查询不到配置:"+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+
+        seconds=5
+        param="SELECT * FROM information_schema.GLOBAL_STATUS WHERE variable_name IN ('Uptime','Queries','Select_full_join','Select_scan','Threads_created','Threads_running','Innodb_buffer_pool_pages_data','Innodb_buffer_pool_pages_free','Innodb_buffer_pool_reads','Innodb_buffer_pool_read_requests','Innodb_buffer_pool_write_requests','Slow_queries')"
+        }
+
+        if (err1==nil) {
+        for row.Next() {
+        row.Scan(&param, &seconds);
+        fmt.Println(param,seconds);
+        mon_error.WriteString("param:"+param+"time:"+time.Now().Format("2006-01-02 15:04:05"))
+        }
+        }
+
+
+        }
+
+
+       
+
+       if (cs.Get_mysql=="1") {
+        fmt.Println("get_mysql=1")
+        go get_param(seconds)
+
+       }
+
+       if (cs.Get_vmstat=="1") {
+        fmt.Println("get_vmstat=1")
+        go get_vmstat(seconds) 
+       }
+
+      
+
+
+        time.Sleep(1 * time.Second)
+
+        fmt.Println("seconds,param",seconds,param)
+        
+        for {   
+                
+                tmp_insert=insert_param()
+
+
+                if (cs.Insertfile=="1") {
+                insertfile.WriteString(tmp_insert)
+                insertfile.Sync()
+                }
+
+
+                
+                 if (cs.Insertmysql=="1" && tmp_insert!="") {
+                 
+                  _,remote_err:=remote_db.Exec(tmp_insert)
+                  if (remote_err != nil) { fmt.Println("remote_err",remote_err) }
+
+                  }
+
+        
+                time.Sleep(time.Duration(seconds)*time.Second)
+        }
+        defer remote_db.Close()
+        defer db_local.Close()
+}
